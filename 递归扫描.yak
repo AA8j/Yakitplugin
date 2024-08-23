@@ -1,0 +1,474 @@
+// 常见未授权：docker、swagger、springboot未授权、druid未授权、Kibana未授权、CouchDB未授权
+// 目录浏览
+// 常见敏感文件
+// 常见组件指纹探测
+// 优化请求逻辑，将常用代码构造为方法，简化代码
+filter := str.NewFilter()
+swg := sync.NewSizedWaitGroup(1)//1个线程，防止太快
+m = sync.NewMutex()
+
+allpathlist := []
+// 已访问过的所有path
+
+//基于对响应包正则查找的检测
+func poc_req_regexp(f_req,path_poc_list,reg_text,TITLE,LEVEL,DESC,RSV){
+    for _, path_poc := range path_poc_list {
+        result := f_req.FuzzMethod("GET").FuzzPath(path_poc).ExecFirst()~
+        if result.Response.StatusCode == 200 {
+            body = str.ExtractBodyFromHTTPResponseRaw(result.ResponseRaw)~
+            bodytext = string(body).Lower()
+            if !path_poc.EndsWith("/") && str.Contains(bodytext, path_poc.Lower()){
+                continue
+            }else{
+                if re.Find(bodytext, reg_text){
+                    if filter.Exist(result.Url) {
+                        continue
+                    }
+                    filter.Insert(result.Url)
+                    risk.NewRisk(
+                        result.Url,
+                        risk.title(TITLE + ": %v" % result.Url),
+                        risk.payload(result.Url),
+                        risk.severity(LEVEL),
+                        risk.description(DESC),
+                        risk.solution(RSV),
+                        risk.type("其它"),
+                        risk.request(result.RequestRaw),
+                        risk.response(result.ResponseRaw),
+                    )
+                }
+            }
+        }
+    }
+}
+//基于对响应包大小的检测
+func poc_req_size(f_req,path_poc,TITLE,LEVEL,DESC,RSV){
+    for result := range f_req.FuzzMethod("GET").FuzzPath(path_poc...).Exec()~{
+        if result.Response.StatusCode == 200 {
+            if len(result.ResponseRaw) > 1048576{
+                // 判断响应包长度，1048576为1mb
+                if filter.Exist(result.Url) {
+                    continue
+                }
+                filter.Insert(result.Url)
+                risk.NewRisk(
+                    result.Url,
+                    risk.title(TITLE + ": %v" % result.Url),
+                    risk.payload(result.Url),
+                    risk.severity(LEVEL),
+                    risk.description(DESC),
+                    risk.solution(RSV),
+                    risk.type("其它"),
+                    risk.request(result.RequestRaw),
+                    risk.response(result.ResponseRaw),
+                )
+            }
+        }
+    }
+}
+
+func check_request_place(){
+    
+}
+
+// mirrorNewWebsitePath 每新出现一个网站路径，关于这个网站路径的第一个请求，将会在这里被传入回调
+mirrorNewWebsitePath = func(isHttps /*bool*/, url /*string*/, req /*[]byte*/, rsp /*[]byte*/, body /*[]byte*/) {
+    u := re.Find(url,`htt.+?://.+?/`)
+    u = u[:len(u)-1]
+
+    //拼接每一层path和poc
+    func pathAddPOC(true_path_NG,PATHS){
+        payload := []
+        for i in true_path_NG{
+            for j in PATHS{
+                payload.Append(i+j)
+            }
+        }
+        return payload
+    }
+
+    swg.Add()
+    defer swg.Done()
+    // 构造一个fuzz数据包
+    freq, err := fuzz.HTTPRequest(req, fuzz.https(isHttps))
+    if err != nil {
+        die(err)
+    }
+    originPath = freq.GetPath()
+    // 本次访问获取的path
+    //println(originPath)
+    ture_path := ""
+    // 本次访问的真实路径（去掉.xxx后缀）
+    true_path_list := []
+    // 真实路径下所有子路径列表
+    true_path_list_notget := []
+    // 去掉访问过的path
+
+
+    if originPath == "/" {
+        true_path_list = ["/"]
+    }else{
+        originPath_mv = originPath.RemovePrefix("/").RemoveSuffix("/")
+        pathstringlist_withnull := originPath_mv.Split("/")
+        path_list_notnull = []
+        // 本次访问的path的所有非空目录
+        for i in pathstringlist_withnull{
+            if i != "" {
+                path_list_notnull.Append(i)
+            }
+        }
+        // 如果最后一层为.xxx，就pop掉，如/1/2/a.php=>/1/2/；/1/2/b.html=>/1/2/
+        if "." in path_list_notnull[-1]{
+            if len(path_list_notnull) == int(1) {
+                true_path_list = ["/"]
+            }else{
+                path_list_notnull.Pop()
+            }
+        }
+        if true_path_list != ["/"]{
+            // 将path递归拼接，如["1","2","3"]=>["1","1/2","1/2/3"]
+            true_path_list = make([]string, len(path_list_notnull))
+            temp = ""
+            for i, s := range path_list_notnull {
+                if i > 0 {
+                    temp += "/"
+                }
+                temp += s
+                true_path_list[i] = temp
+            }
+        }
+    }
+
+    if true_path_list != ["/"]{
+        // 去掉的已经访问过的path
+        for i in true_path_list{
+            if u + "/" + i +"/" in allpathlist{
+                continue
+            }else{
+                true_path_list_notget.Append("/"+i+"/")
+            }
+        }
+        // 默认增加根路径
+        if u + "/" in allpathlist{
+        }else{
+            true_path_list_notget.Append("/")
+        }
+    }else{
+        if u + "/" in allpathlist{
+            true_path_list_notget = []
+        }else{
+            true_path_list_notget = ["/"]
+        }
+    }
+
+    
+
+    if true_path_list_notget{
+        for i in true_path_list_notget{
+            if u + "/" + i in allpathlist{
+            }else{
+                allpathlist.Append(u + i)
+            }
+        }
+        println("===========监测到新增路径===========")
+        for i in allpathlist{
+            println(i)
+        }
+        println("==================================")
+
+        // 获取所有参数
+        QueryParams = freq.GetQueryKeys()
+        freq_rm_params := freq.GetBytes()
+
+        for i in QueryParams{
+            freq_rm_params = poc.BuildRequest(freq_rm_params, poc.deleteQueryParam(i))
+        }
+        // 重新构造freq为没有参数的fuzz请求
+        freq, err = fuzz.HTTPRequest(freq_rm_params, fuzz.https(isHttps))
+        if err != nil {
+            die(err)
+        }
+
+        func DockerAPIUnauthorized(){
+            // docker api 未授权
+            DockerAPI_DESC = `Docker Remote API因配置不当可以未授权访问，被攻击者恶意利用。攻击者无需认证访问到Docker数据，可能导致敏感信息泄露，黑客也可以恶意删除Docker上的数据。攻击者可进一步利用Docker自身特性，直接访问宿主机上的敏感信息，或对敏感文件进行修改，最终完全控制服务器。`
+            DockerAPI_RSV = `1、修改Docker Remote API服务默认参数。（需要重启Docker服务才能生效）修改Docker的启动参数，定位到DOCKER_OPTS中的“tcp://0.0.0.0:2375”，将“0.0.0.0”修改为“127.0.0.1”，或将默认端口2375改为自定义端口。
+    2、为Remote API设置认证措施。（需要重启Docker服务才能生效）参照官方文档配置Remote API的认证措施。详情见：https://docs.docker.com/engine/reference/api/docker_remote_api///authentication
+    3、修改Docker服务运行账号。（需要重启Docker才能生效）请以较低权限账号运行Docker服务。另外可以限制攻击者执行高危命令。
+    4、设置防火墙策略。如果正常业务中API服务需要被其他服务器来访问，可以设置iptables策略仅允许指定的IP来访问Docker接口。`
+            DockerAPI_POCS = [
+                "version",
+                "v2/_catalog"
+            ]
+            DockerAPI_payload := []
+            DockerAPI_payload = pathAddPOC(true_path_list_notget, DockerAPI_POCS)
+            // path+poc
+            docker_reg_text := `platform|components`
+            docker_TITLE := `Docker未授权`
+            docker_LEVEL := `high`
+            poc_req_regexp(freq,DockerAPI_payload,docker_reg_text,docker_TITLE,docker_LEVEL,DockerAPI_DESC,DockerAPI_RSV)
+        }
+
+        func BakFileDetect(){
+            //备份文件检测
+            BakFile_DESC = `敏感文件泄露，在web服务中，尝尝不局限于网站的源代码泄露，网站的数据库备份文件，以及上传的敏感文件，或者一切正常备份，原则不允许访问的文件可被通过访问web路径进行下载得到，造成其信息泄露。有效的帮助攻击者理解网站应用逻辑，为展开其他类型的攻击提供 有利信息，降低攻击的难度，可以进一步获取其他敏感数据。`
+            BakFile_RSV = `1、网站管理员严格检查web中可访问的路径下是否存在备份文件，常见备份文件后缀为 jsp.bak、.bak、.sql、.txt、等等。如果有这些文件，直接将该备份文件进行转移到其他目录或者直接删除即可。
+    2、严格控制可网站可访问目录下的文件敏感度的存方 OCR工具感文件置于该目录。`
+            BakFile_POCS = [
+                "web.tar.gz",
+                "web.zip",
+                "web.rar",
+                "www.zip",
+                "www.tar.gz",
+                "backup.zip",
+                "old.zip",
+                "ui.zip",
+                "media.zip",
+                "readme.md",
+                "config.xml",
+                "web-inf.zip",
+                "dump",
+                "db.sql",
+                "sql.log",
+                "sql.zip",
+                "log.zip",
+                "heapdump",
+                "actuator/heapdump",
+                "api/actuator/heapdump"
+            ]
+            BakFile_payload = []
+            BakFile_payload = pathAddPOC(true_path_list_notget, BakFile_POCS)
+            // path+poc
+            BakFile_TITLE := `敏感文件泄露`
+            BakFile_LEVEL := `high`
+            poc_req_size(freq,BakFile_payload,BakFile_TITLE,BakFile_LEVEL,BakFile_DESC,BakFile_RSV)
+        }
+        //Swagger未授权
+        func SwaggerUnauthorized(){
+            Swagger_DESC = `Swagger-UI会根据开发人员在代码中的设置来自动生成API说明文档，若存在相关的配置缺陷，攻击者可以未授权翻查Swagger接口文档，得到系统功能API接口的详细参数，再构造参数发包，通过回显获取系统大量的敏感信息。还可能导致接口越权、接口SQL注入、接口未授权访问、文件上传和测试信息泄露等危害，为后续进一步渗透做准备。`
+            Swagger_RSV = `1.开启swagger页面的访问控制。
+    2.结合SpringSecurity/shiro进行认证授权，将Swagger-UI的URLs加入到各自的认证和授权过滤链中，当用户访问Swagger对应的资源时，只有通过认证授权的用户才能进行访问。
+    3.结合nginx/Filter对对应的接口端点进行访问控制。`
+            Swagger_POCS = [
+                "api-docs",
+                "swagger-resources",
+                "v1/api-docs",
+                "v2/api-docs",
+                "v3/api-docs",
+                "openapi.json",
+                "doc.html",
+                "swagger-ui.html",
+                "swagger/index.html",
+                "swagger/ui/index",
+                "swagger-resources/configuration/ui",
+                "api/api-docs",
+                "api/swagger-resources",
+                "api/v1/api-docs",
+                "api/v2/api-docs",
+                "api/v3/api-docs",
+                "api/openapi.json",
+                "api/doc.html",
+                "api/swagger-ui.html",
+                "api/swagger/index.html",
+                "api/swagger/ui/index"
+            ]
+            Swagger_payload := []
+            Swagger_payload = pathAddPOC(true_path_list_notget, Swagger_POCS)
+            // path+poc
+            Swagger_reg_text := `swagger ui|swagger":|swagger 2.0|info|deepLinking":`
+            Swagger_TITLE := `Swagger未授权`
+            Swagger_LEVEL := `high`
+            poc_req_regexp(freq,Swagger_payload,Swagger_reg_text,Swagger_TITLE,Swagger_LEVEL,Swagger_DESC,Swagger_RSV)
+        }
+
+        //Springboot未授权
+        func SpringbootUnauthorized(){
+            // SpringBoot 未授权
+            SpringBoot_DESC = `Actuator是Spring Boot提供的服务监控和管理中间件，默认配置会出现接口未授权访问，部分接口会泄露网站流量信息和内存信息等，使用Jolokia库特性甚至可以远程执行任意代码，获取服务器权限。`
+            SpringBoot_RSV = `1、正确配置springboot，防止造成未授权访问。`
+            SpringBoot_POCS = [
+                "env",
+                "actuator",
+                "actuator/env",
+                "api/env",
+                "api/actuator",
+                "api/actuator/env"
+            ]
+            SpringBoot_payload := []
+            SpringBoot_payload = pathAddPOC(true_path_list_notget, SpringBoot_POCS)
+            // path+poc
+            SpringBoot_reg_text := `_links":|self":|health"`
+            SpringBoot_TITLE := `Springboot未授权`
+            SpringBoot_LEVEL := `medium`
+            poc_req_regexp(freq,SpringBoot_payload,SpringBoot_reg_text,SpringBoot_TITLE,SpringBoot_LEVEL,SpringBoot_DESC,SpringBoot_RSV)
+        }
+
+        func DruidMonitorUnauthorized(){
+            // Druid Monitor未授权
+            DruidMonitor_DESC = `Druid是阿里巴巴数据库事业部出品，为监控而生的数据库连接池。Druid提供的监控功能，监控SQL的执行时间、监控Web URI的请求、Session监控。当开发者配置不当时就可能造成未授权访问漏洞。`
+            DruidMonitor_RSV = `1、设置StatViewServlet（监控页面）为 false。
+    2、给druid的web页面设置账户密码，增加访问druid的权限。`
+            DruidMonitor_POCS = [
+                "druid/index.html",
+                "prod-api/druid/index.html"
+            ]
+            DruidMonitor_payload = []
+            DruidMonitor_payload = pathAddPOC(true_path_list_notget, DruidMonitor_POCS)
+            // path+poc
+            DruidMonitor_reg_text := `druidversion|druid stat index|druiddrivers`
+            DruidMonitor_TITLE := `DruidMonitor未授权`
+            DruidMonitor_LEVEL := `medium`
+            poc_req_regexp(freq,DruidMonitor_payload,DruidMonitor_reg_text,DruidMonitor_TITLE,DruidMonitor_LEVEL,DruidMonitor_DESC,DruidMonitor_RSV)
+        }
+
+        func DirList(){
+            // 目录浏览
+            DirList_DESC = `由于服务器中间件配置不当，客户端可以直接访问站点文件目录。如目录中恰好存在敏感文件(如配置文件、备份文件、数据库文件等)，可被直接下载，导致严重的敏感信息泄露。`
+            DirList_RSV = `正确配置服务器中间件，关闭目录浏览。`
+            DirList_POCS = [
+                ""
+            ]
+            DirList_payload = []
+            DirList_payload = pathAddPOC(true_path_list_notget, DirList_POCS)
+            // path+poc
+            DirList_reg_text := `list of|index of|directory listing`
+            DirList_TITLE := `DirList未授权`
+            DirList_LEVEL := `medium`
+            poc_req_regexp(freq,DirList_payload,DirList_reg_text,DirList_TITLE,DirList_LEVEL,DirList_DESC,DirList_RSV)
+        }
+
+        func Finger(){
+            // 常见指纹
+            Finger_DESC = `常见指纹。`
+            Finger_RSV = `"druid/login.html",//druid-panel
+                "index",//kkfileview-panel
+                "xxl-job-admin/toLogin",//xxljob-panel
+                "toLogin",//xxljob-panel
+                "explore",//gitlab-panel
+                "users/sign_in",//gitlab-panel
+                "console/login/LoginForm.jsp",//weblogic
+                "nacos/v1/console/server/state",//nacos-panel
+                "v1/console/server/state",//nacos-panel
+                "nacos",//nacos-panel
+                "api/xml",//jenkins-api-panel
+                "auth.html",//sonicwall-management-panel
+                "login",//grafana-panel
+                "web",//geoserver-login-panel
+                "geoserver/web",//geoserver-login-panel
+                "phpmyadmin",//phpMyAdmin Panel`
+            Finger_POCS = [
+                "druid/login.html",
+                //druid-panel
+                "index",
+                //kkfileview-panel
+                "xxl-job-admin/toLogin",
+                //xxljob-panel
+                "toLogin",
+                //xxljob-panel
+                "explore",
+                //gitlab-panel
+                "users/sign_in",
+                //gitlab-panel
+                "console/login/LoginForm.jsp",
+                //weblogic
+                "nacos/v1/console/server/state",
+                //nacos-panel
+                "v1/console/server/state",
+                //nacos-panel
+                "nacos",
+                //nacos-panel
+                "api/xml",
+                //jenkins-api-panel
+                "auth.html",
+                //sonicwall-management-panel
+                "login",
+                //grafana-panel
+                "web",
+                //geoserver-login-panel
+                "geoserver/web",
+                //geoserver-login-panel
+                "phpmyadmin",
+                //phpMyAdmin Panel
+            ]
+            Finger_payload = []
+            Finger_payload = pathAddPOC(true_path_list_notget, Finger_POCS)
+            // path+poc
+            Finger_reg_text := `druid monitor|kkfileview|xxl|调度中心|gitlab|gitlab|weblogic|error 404--not found|from rfc 2068|version":|<title>nacos|hudson.model.hudson|<title>sonicwall|<title>grafana|<title>geoserver|<title>phpmyadmin`
+            Finger_TITLE := `发现常见指纹`
+            Finger_LEVEL := `info`
+            poc_req_regexp(freq,Finger_payload,Finger_reg_text,Finger_TITLE,Finger_LEVEL,Finger_DESC,Finger_RSV)
+        }
+
+        func KibanaUnauthorized(){
+            // Kibana未授权
+            Kibana_DESC = `Kibana如果允许外网访问，没有做安全的登录认证，也会被外部随意访问查看所有的数据，造成大量内部数据泄露。`
+            Kibana_RSV = `1、设置防火墙策略，限定制定 IP 访问服务；
+    2、设置 kibana 监听本地地址，并设置ElasticSearch登录的账号和密码；`
+            Kibana_POCS = [
+                "app/kibana"
+            ]
+            Kibana_payload = []
+            Kibana_payload = pathAddPOC(true_path_list_notget, Kibana_POCS)
+            // path+poc
+            Kibana_reg_text := `kibanawelcomeview`
+            Kibana_TITLE := `Kibana未授权`
+            Kibana_LEVEL := `high`
+            poc_req_regexp(freq,Kibana_payload,Kibana_reg_text,Kibana_TITLE,Kibana_LEVEL,Kibana_DESC,Kibana_RSV)
+        }
+
+        func CouchDBUnauthorized(){
+            // CouchDB未授权
+            CouchDB_DESC = `Apache CouchDB 是一个开源数据库，默认会在5984端口开放Restful的API接口，如果使用SSL就会监听在6984端口，用于数据库的管理功能。其HTTP Server默认开启时没有进行验证，而且绑定在0.0.0.0，所有用户均可通过API访问导致未授权访问。`
+            CouchDB_RSV = `1、指定CouchDB绑定的IP （需要重启CouchDB才能生效） ：在 /etc/couchdb/local.ini 文件中找到 bind_address = 0.0.0.0，把 0.0.0.0 修改为 127.0.0.1 ，然后保存。注：修改后只有本机才能访问CouchDB。
+    2、设置访问密码 （需要重启CouchDB才能生效） 在配置文件 /etc/couchdb/local.ini中找到 [admins] 字段配置密码`
+            CouchDB_POCS = [
+                "_config"
+            ]
+            CouchDB_payload = []
+            CouchDB_payload = pathAddPOC(true_path_list_notget, CouchDB_POCS)
+            // path+poc
+            CouchDB_reg_text := `httpd_design_handlers`
+            CouchDB_TITLE := `CouchDB未授权`
+            CouchDB_LEVEL := `high`
+            poc_req_regexp(freq,CouchDB_payload,CouchDB_reg_text,CouchDB_TITLE,CouchDB_LEVEL,CouchDB_DESC,CouchDB_RSV)
+        }
+
+        if true_path_list_notget {
+            DirList()
+            // 目录浏览
+            time.sleep(0.5)//控制访问速度
+
+            BakFileDetect()
+            // 敏感文件泄露
+            time.sleep(0.5)//控制访问速度
+
+            DockerAPIUnauthorized()
+            // docker api 未授权
+            time.sleep(0.5)//控制访问速度
+
+            SwaggerUnauthorized()
+            // Swagger未授权
+            time.sleep(0.5)//控制访问速度
+
+            SpringbootUnauthorized()
+            //Springboot未授权
+            time.sleep(0.5)//控制访问速度
+
+            DruidMonitorUnauthorized()
+            // Druid Monitor未授权
+            time.sleep(0.5)//控制访问速度
+
+            KibanaUnauthorized()
+            // Kibana未授权
+            time.sleep(0.5)//控制访问速度
+
+            CouchDBUnauthorized()
+            // CouchDB未授权
+            time.sleep(0.5)//控制访问速度
+
+            Finger()
+            // 常见指纹
+            time.sleep(0.5)//控制访问速度
+        }
+    }
+}

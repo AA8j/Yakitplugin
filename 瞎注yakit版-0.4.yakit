@@ -1,0 +1,134 @@
+params_list = []
+# mirrorNewWebsitePathParams 每新出现一个网站路径且带有一些参数，参数通过常见位置和参数名去重，去重的第一个 HTTPFlow 在这里被调用
+mirrorNewWebsitePathParams = func(isHttps /*bool*/, url /*string*/, req /*[]byte*/, rsp /*[]byte*/, body /*[]byte*/) {
+    freq, err := fuzz.HTTPRequest(req, fuzz.https(isHttps))
+    die(err)
+    //params := freq.GetCommonParams()
+    // 会有cookie里的参数
+
+    u := re.Find(url,`htt.+?://.+?/`)
+    url = u + freq.GetPath()
+
+
+    // 获取除了cookie里的所有参数
+    allparams = freq.GetCommonParams()
+    cookieparams = freq.GetCookieParams()
+    for p in cookieparams{
+        allparams.Remove(p)
+    }
+    params = allparams
+    
+    DBMS_ERRORS = {"MySQL": [`SQL syntax.*MySQL`, `Warning.*mysql_.*`, `valid MySQL result`, `MySqlClient\.`], "PostgreSQL": [`PostgreSQL.*ERROR`, `Warning.*\Wpg_.*`, `valid PostgreSQL result`, `Npgsql\.`], "Microsoft SQL Server": [`Driver.* SQL[\-\_\ ]*Server`, `OLE DB.* SQL Server`, `(\W|\A)SQL Server.*Driver`, `Warning.*mssql_.*`, `(\W|\A)SQL Server.*[0-9a-fA-F]{8}`, `(?s)Exception.*\WSystem\.Data\.SqlClient\.`, `(?s)Exception.*\WRoadhouse\.Cms\.`], "Microsoft Access": [`Microsoft Access Driver`, `JET Database Engine`, `Access Database Engine`], "Oracle": [`\bORA-[0-9][0-9][0-9][0-9]`, `Oracle error`, `Oracle.*Driver`, `Warning.*\Woci_.*`, `Warning.*\Wora_.*`], "IBM DB2": [`CLI Driver.*DB2`, `DB2 SQL error`, `\bdb2_\w+\(`], "SQLite": [`SQLite/JDBCDriver`, `SQLite.Exception`, `System.Data.SQLite.SQLiteException`, `Warning.*sqlite_.*`, `Warning.*SQLite3::`, `\[SQLITE_ERROR\]`], "Sybase": [`(?i)Warning.*sybase.*`, `Sybase message`, `Sybase.*Server message.*`]}
+
+    func dbms_errors_check(result, param, payload){
+        for DBMS, regexps = range DBMS_ERRORS {
+                    if str.MatchAnyOfRegexp(result.ResponseRaw, regexps...) {
+                        yakit_output("确认后端数据库报错")
+                        risk.NewRisk(
+                            result.Url,
+                            risk.severity("high"),
+                            risk.description("基于错误（Error-based）的 SQL 注入是一种常见的攻击技术，攻击者利用应用程序返回的错误信息来推断和获取数据库的敏感信息。它利用了应用程序在处理 SQL 查询时可能发生的错误情况，从而揭示了关于数据库结构、数据内容和其他敏感信息的细节。"),
+                            risk.solution("使用参数化查询,使用 ORM（对象关系映射）框架,进行输入验证和过滤,代码遵循最小权限原则"),
+                            risk.title(str.f(
+                                "ERROR-Based SQL Injection: [%v:%v] Guess DBMS: %v",
+                                param.Name(),
+                                param.Value(),
+                                DBMS,
+                            )),
+                            risk.titleVerbose(str.f(
+                                "%v的%v参数可能存在%v报错型SQL注入",
+                                result1.Url,
+                                param.Name(),
+                                DBMS,
+                            )),
+                            risk.type("sqlinjection"),
+                            risk.request(result.RequestRaw),
+                            risk.response(result.ResponseRaw),
+                            risk.payload(payload),
+                            risk.parameter(param.Name()),
+                        )//考虑增加一些探测payload 比如 extractvalue或者updatexml 这样就能确认，确实可以利用报错点进行注入
+                        yakit_output("参数: " + param.Name() + "存在报错注入")
+                        return
+                    }
+
+                }
+    }
+
+    func check_len(resutl0, result1, result2, param, payload){
+        len0 := len(string(resutl0))
+        len1 := len(string(result1.ResponseRaw))
+        len2 := len(string(result2.ResponseRaw))
+        if len1 != len2{
+                if len0 == len2{
+                    yakit_output("很可能存在注入")
+                    risk.NewRisk(
+                        result1.Url,
+                        risk.severity("high"),
+                        risk.description("很可能存在SQL注入"),
+                        risk.solution(""),
+                        risk.title(str.f(
+                            "%v的%v参数很可能存在注入",
+                            result1.Url,
+                            param.Name(),
+                        )),
+                        risk.type("sqlinjection"),
+                        risk.request(result1.RequestRaw),
+                        risk.response(result1.ResponseRaw),
+                        risk.payload(payload),
+                        risk.parameter(param.Name()),
+                    )//考虑增加一些探测payload 比如 extractvalue或者updatexml 这样就能确认，确实可以利用报错点进行注入
+                    yakit_output("参数: " + param.Name() + "很可能存在SQL注入")
+                    return
+                }else{
+                    yakit_output("可能存在注入")
+                    risk.NewRisk(
+                        result1.Url,
+                        risk.severity("info"),
+                        risk.description("可能存在SQL注入"),
+                        risk.solution(""),
+                        risk.title(str.f(
+                            "%v的%v参数可能存在注入",
+                            result1.Url,
+                            param.Name(),
+                        )),
+                        risk.type("sqlinjection"),
+                        risk.request(result1.RequestRaw),
+                        risk.response(result1.ResponseRaw),
+                        risk.payload(payload),
+                        risk.parameter(param.Name()),
+                    )//考虑增加一些探测payload 比如 extractvalue或者updatexml 这样就能确认，确实可以利用报错点进行注入
+                    yakit_output("参数: " + param.Name() + "可能存在SQL注入")
+                    return
+                }
+            }
+    }
+
+    if params{
+        for p in params{
+            // 检查路径下每个参数是否已经测试过了
+            if url + string(p) in params_list{
+                continue
+            }else{
+                params_list.Append(url + " " + string(p))
+                // 不管是不是数字都用单双引号fuzz
+                result1 := p.Fuzz(p.Value() + "'").Show().ExecFirst()~
+                result2 := p.Fuzz(p.Value() + "''").Show().ExecFirst()~
+                check_len(rsp, result1, result2, p, p.Value() + "'")
+                dbms_errors_check(result1, p, p.Value() + "'")
+                dbms_errors_check(result2, p, p.Value() + "''")
+                // 如果是数字多进行一次fuzz
+                if string(p.Value()).IsDigit(){
+                    result1 := p.Fuzz(p.Value() + "-0").Show().ExecFirst()~
+                    result2 := p.Fuzz(p.Value() + "-1").Show().ExecFirst()~
+                    check_len(rsp, result1, result2, p, p.Value() + "-1")
+                    dbms_errors_check(result1, p, p.Value() + "-0")
+                    dbms_errors_check(result2, p, p.Value() + "-1")
+                }
+            }
+        }
+        println("===========已测试参数============")
+        for p in params_list{
+            print(p)
+        }
+    }
+}

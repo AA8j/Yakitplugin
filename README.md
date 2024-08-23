@@ -7,4 +7,5 @@
 常见组件指纹探测  
 
 2、瞎注yakit版  
-重写burp插件：瞎注
+重写burp插件瞎注基础功能  
+原版：https://github.com/smxiazi/xia_sql

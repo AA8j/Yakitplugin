@@ -1,153 +1,304 @@
+这是一个yaklang写的yakit的插件代码：
+
 yakit.AutoInitYakit()
 
-
-// 1. 交互式UI定义
-enableDeduplication = cli.Bool(
-    "deduplication",
-    cli.setVerboseName("开启请求去重"),
-    cli.setDefault(true),
-    cli.setHelp("开启后，每个URL只会被插件修改并测试一次。关闭则会对每个经过代理的请求都进行测试。"),
+// 插件参数配置
+header = cli.String(
+    "header",
+    cli.setVerboseName("删除的 Header Key"),
+    cli.setHelp("需删除的请求头，多个用逗号(,)或竖线(|)分隔，与set-header二选一")
 )
-deleteHeaders = cli.String(
-    "delete_headers",
-    cli.setVerboseName("删除的请求头 (逗号分隔)"),
-    cli.setHelp("例如: User-ID,Token,X-User-Type"),
-)
-setHeaders = cli.String(
-    "set_headers",
-    cli.setVerboseName("设置/修改的请求头"),
-    cli.setHelp(`格式: "Key1:Value1,Key2:Value2", 例如: "Authorization:,Cookie:"`),
+setHeader = cli.String(
+    "set-header",
+    cli.setVerboseName("设置/替换 Header"),
+    cli.setHelp("格式: Header-Name:Header-Value，多个用逗号分隔（如Cookie:123,User-Agent:test）")
 )
 similarityThreshold = cli.Float(
     "similarity",
-    cli.setVerboseName("响应体相似度阈值"),
-    cli.setDefault(0.95),
-    cli.setHelp("当相似度高于此值时报告漏洞，范围 0.0-1.0"),
+    cli.setVerboseName("相似度阈值"),
+    cli.setDefault(0.8),
+    cli.setHelp("判断响应体相似的阈值（0-1之间，默认0.8，值越高判定越严格）")
 )
-
 cli.check()
 
-if deleteHeaders == "" && setHeaders == "" {
-    die("错误：请至少填写 '删除的请求头' 或 '设置/修改的请求头' 中的一项。")
+// 定义需要过滤的静态资源扩展名
+filteredExts = []string{
+    ".js", ".css", ".png", ".jpg", ".jpeg", 
+    ".gif", ".ico", ".svg", ".woff", ".woff2",
+    ".ttf", ".eot", ".otf"
 }
 
-// 初始化一个并发安全的Map，用于记录已处理的URL
-processedUrls := sync.NewMap()
-
-// 预处理用户输入的 Headers
-deleteHeaderKeys := str.Split(deleteHeaders, ",")
-setHeaderMap := make(map[string]string)
-if setHeaders != "" {
-    pairs := str.Split(setHeaders, ",")
-    for _, pair := range pairs {
-        kv := str.SplitN(pair, ":", 2)
-        if len(kv) == 2 {
-            key := str.TrimSpace(kv[0])
-            val := str.TrimSpace(kv[1])
-            if key != "" {
-                setHeaderMap[key] = val
+// 解析需删除的请求头列表
+deleteHeaders = make([]string, 0)
+if header != "" {
+    for _, commaPart := range str.Split(header, ",") {
+        for _, pipePart := range str.Split(commaPart, "|") {
+            trimmedHeader := str.TrimSpace(pipePart)
+            if trimmedHeader != "" {
+                deleteHeaders = append(deleteHeaders, trimmedHeader)
             }
         }
     }
 }
 
-staticFileExtensions := [
-    ".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico",
-    ".woff", ".woff2", ".ttf", ".eot", ".map", ".webp", ".mp4", ".mp3",
-    ".webm", ".ogg", ".wav", ".flac", ".aac",
-]
-
-mirrorFilteredHTTPFlow = func(isHttps /*bool*/, url /*string*/, req /*[]byte*/, rsp /*[]byte*/, body /*[]byte*/) {
-    // 新增：去重逻辑
-    if enableDeduplication {
-        // LoadOrStore 是一个原子操作，它会尝试加载key，如果不存在，则存储新值并返回false
-        // 如果key已存在，则直接返回true。
-        // 这样可以确保即使在并发情况下，同一个URL也只会被处理一次。
-        _, loaded := processedUrls.LoadOrStore(url, true)
-        if loaded {
-            return // 如果URL已加载过（即已处理），则直接跳过
+// 解析需设置/替换的请求头（键值对）
+setHeaders = make(map[string]string)
+if setHeader != "" {
+    for _, headerPair := range str.Split(setHeader, ",") {
+        parts := str.SplitN(headerPair, ":", 2)
+        if len(parts) == 2 {
+            key := str.TrimSpace(parts[0])
+            value := str.TrimSpace(parts[1])
+            if key != "" {
+                setHeaders[key] = value
+            }
         }
-    }
-
-    if len(deleteHeaderKeys) == 0 && len(setHeaderMap) == 0 {
-        return
-    }
-
-    pathWithoutQuery := poc.GetHTTPRequestPathWithoutQuery(req)
-    for _, ext := range staticFileExtensions {
-        if str.EndsWith(str.ToLower(pathWithoutQuery), ext) {
-            return
-        }
-    }
-
-    modifiedReq := append([]byte(nil), req...)
-    modifiedHeadersInfo := []string{}
-
-    for _, headerKey := range deleteHeaderKeys {
-        key := str.TrimSpace(headerKey)
-        if key != "" {
-            modifiedReq = poc.DeleteHTTPPacketHeader(modifiedReq, key)
-            modifiedHeadersInfo.Append(str.f("删除: %s", key))
-        }
-    }
-
-    for key, value := range setHeaderMap {
-        modifiedReq = poc.ReplaceHTTPPacketHeader(modifiedReq, key, value)
-        modifiedHeadersInfo.Append(str.f("设置: %s: %s", key, value))
-    }
-    
-    if len(modifiedHeadersInfo) == 0 {
-        return
-    }
-
-    freq, err := fuzz.HTTPRequest(modifiedReq, fuzz.https(isHttps))
-    if err != nil {
-        yakit.Error("创建重放请求失败: %v", err)
-        return
-    }
-    
-    result := freq.ExecFirst()~
-    if result.Error != nil {
-        yakit.Warn("重放请求失败 [%s]: %v", url, result.Error)
-        return
-    }
-
-    originalStatusCode := poc.GetStatusCodeFromResponse(rsp)
-    newStatusCode := poc.GetStatusCodeFromResponse(result.ResponseRaw)
-
-    if originalStatusCode != newStatusCode {
-        return
-    }
-
-    originalBody, err := str.ExtractBodyFromHTTPResponseRaw(rsp)
-    if err != nil { return }
-    newBody, err := str.ExtractBodyFromHTTPResponseRaw(result.ResponseRaw)
-    if err != nil { return }
-
-    similarity := str.CalcSimilarity(string(originalBody), string(newBody))
-    
-    if similarity >= similarityThreshold {
-        risk.NewRisk(
-            result.Url,
-            risk.title(str.f("疑似未授权访问: %s", result.Url)),
-            risk.payload(str.Join(modifiedHeadersInfo, ", ")),
-            risk.severity("high"),
-            risk.description(str.f(
-                "通过修改或删除请求头 [%s] 后重新请求，服务器返回的响应状态码与原始响应码一致(%d)，且响应内容基本一致 (相似度: %.2f%%)，可能存在未授权访问漏洞。",
-                str.Join(modifiedHeadersInfo, ", "),
-                originalStatusCode,
-                similarity*100,
-            )),
-            risk.solution("对需要身份验证和授权的接口进行严格的访问控制检查，确保即使在缺少或伪造关键请求头的情况下，也无法访问受保护的资源。"),
-            risk.type("未授权访问"),
-            risk.request(result.RequestRaw),
-            risk.response(result.ResponseRaw),
-        )
     }
 }
 
-// 保持插件结构完整
-mirrorHTTPFlow = func(isHttps /*bool*/, url /*string*/, req /*[]byte*/, rsp /*[]byte*/, body /*[]byte*/) {}
-mirrorNewWebsite = func(isHttps /*bool*/, url /*string*/, req /*[]byte*/, rsp /*[]byte*/, body /*[]byte*/) {}
-mirrorNewWebsitePath = func(isHttps /*bool*/, url /*string*/, req /*[]byte*/, rsp /*[]byte*/, body /*[]byte*/) {}
-mirrorNewWebsitePathParams = func(isHttps /*bool*/, url /*string*/, req /*[]byte*/, rsp /*[]byte*/, body /*[]byte*/) {}
+// 从URL中提取路径部分（去除查询参数和哈希）
+getUrlPath = func(url) {
+    // 去除哈希部分（#及后面的内容）
+    hashIndex := str.Index(url, "#")
+    if hashIndex != -1 {
+        url = url[:hashIndex]
+    }
+    
+    // 去除查询参数部分（?及后面的内容）
+    queryIndex := str.Index(url, "?")
+    if queryIndex != -1 {
+        return url[:queryIndex]
+    }
+    return url
+}
+
+// 检查URL是否包含需要过滤的扩展名
+shouldFilter = func(url) {
+    // 获取纯路径部分（不含查询参数和哈希）
+    urlPath := getUrlPath(url)
+    lowerPath := str.ToLower(urlPath)
+    
+    // 检查路径是否包含任何需要过滤的扩展名
+    for _, ext := range filteredExts {
+        if str.Contains(lowerPath, ext) {
+            return true
+        }
+    }
+    return false
+}
+
+// 核心逻辑：被动重新发送请求并检测未授权访问
+mirrorFilteredHTTPFlow = func(isHttps, url, req, rsp, body) {
+    // 过滤静态资源请求
+    if shouldFilter(url) {
+        return
+    }
+
+    if len(deleteHeaders) <= 0 && len(setHeaders) <= 0 {
+        return
+    }
+
+    // 记录原始响应体
+    originBody := string(body)
+
+    // 修改请求头
+    modifiedReq = req
+    for _, h := range deleteHeaders {
+        modifiedReq = poc.DeleteHTTPPacketHeader(modifiedReq, h)
+    }
+    for key, value := range setHeaders {
+        modifiedReq = poc.ReplaceHTTPPacketHeader(modifiedReq, key, value)
+    }
+
+    // 被动重新发送请求
+    _, modifiedRsp, err := poc.HTTP(modifiedReq, poc.https(isHttps))
+    if err != nil {
+        yakit.Error("发送修改后请求失败: %s", err)
+        return
+    }
+
+    // 直接使用modifiedRsp（[]uint8类型）作为响应体字节数组，无需调用GetAllBody
+    modifiedBody := string(modifiedRsp)
+
+    // 使用Yaklang内置函数计算响应体相似度
+    similarity := str.CalcSimilarity(originBody, modifiedBody)
+    similarityMatch := similarity >= similarityThreshold
+
+    if similarityMatch {
+        // 输出未授权访问漏洞信息
+        yakit.Info("【未授权访问漏洞】URL: %s", url)
+        yakit.Info("响应体相似度: %.2f（阈值: %.2f）", similarity, similarityThreshold)
+
+        if len(deleteHeaders) > 0 {
+            yakit.Info("已删除请求头: %v", deleteHeaders)
+        }
+        if len(setHeaders) > 0 {
+            yakit.Info("已设置/替换请求头: %v", setHeaders)
+        }
+
+        // 保存流量到数据库
+        db.SaveHTTPFlowFromRawWithOption(url, modifiedReq, modifiedRsp)
+    }
+}
+
+// 空实现其他镜像函数
+mirrorHTTPFlow = func(isHttps, url, req, rsp, body) {
+}
+
+mirrorNewWebsite = func(isHttps, url, req, rsp, body) {
+}
+
+mirrorNewWebsitePath = func(isHttps, url, req, rsp, body) {
+}
+
+mirrorNewWebsitePathParams = func(isHttps, url, req, rsp, body) {
+}
+
+
+请求1：
+POST /bi/api/orgMember/queryAuthList HTTP/1.1
+Host: a82.seeyoncd.com
+X-Last-Requested-ID: 586001cf-3c1d-4ad5-8744-569da780fa2c
+Accept-Language: zh-CN,zh;q=0.8,zh-TW;q=0.7,zh-HK;q=0.5,en-US;q=0.3,en;q=0.2
+Accept-Encoding: gzip, deflate
+X-Requested-By: fe-seeyon-bi-com
+Referer: http://a82.seeyoncd.com/bi/repository-management/data-warehouse
+X-Current-Requested-Time: 2025-09-17 17:20:39 229
+User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:142.0) Gecko/20100101 Firefox/142.0
+Content-Type: application/json
+Cookie: login_locale=zh_CN; sw_scope=3082323774871519895; avatarImageUrl=3082323774871519895; ssoToken=01633ceaqcee5q4c11qa1bcq4bd51c57f45f; __viewF__=; __editableF__=
+X-Requested-ID: b220e396-0974-4754-bf34-13ba45339e4c
+Origin: http://a82.seeyoncd.com
+Accept: application/json, text/plain, */*
+Authorization: Bearer 84fca787q4b25q4241q93a3q3d6cb385e2d3
+X-Last-Requested-Time: 2025-09-17 17:20:38 098
+Content-Length: 3
+
+{}
+
+响应1：
+HTTP/1.1 200
+Server: nginx/1.16.1
+Date: Wed, 17 Sep 2025 09:20:39 GMT
+Content-Type: application/json
+Connection: keep-alive
+vary: accept-encoding
+Content-Length: 24004
+
+{
+  "traceId": "af0fe340273d367577a4d5c69414317f",
+  "code": 200,
+  "msg": "成功",
+  "data": [
+    {
+      "id": "-3943889392087973",
+      "parentId": "5891867659426024430",
+      "code": "answer-template-management",
+      "name": "回答模版管理",
+      "type": "menu",
+      "sort": 2,
+      "isdelete": 0,
+      "allowed": false,
+      "createTime": "2025-06-04 11:07:23",
+      "createUser": null,
+      "updateTime": "2025-06-04 11:07:33",
+      "updateUser": null,
+      "resourceUri": "{/bi/api/intelligent/queryDataSets,/bi/api/functionPermissions/queryReports,/bi/api/intelligent/getApplicationList,/bi/api/intelligent/agent/saveOrUpdate,/bi/api/intelligent/agent/list,/bi/api/intelligent/app/import-progress?requestId=,/bi/api/intelligent/query/global?intelligentManagementId=,/bi/api/intelligent/query/knowledgeBase?intelligentManagementId=,/bi/api/intelligent/query/sqlSample?intelligentManagementId=,/bi/api/intelligent/saveOrUpdate/sqlExample,/bi/api/intelligent/saveOrUpdate/knowledge,/bi/api/intelligent/saveOrUpdate/globalSetting,/bi/api/intelligent/generateSql,/bi/api/intelligent/delete/setting?id=,/bi/api/intelligent/update/schema,/bi/api/intelligent/app/download,/bi/api/intelligent/app/upload,/bi/api/intelligent/app/install,/bi/api/intelligent/assistant/detail/list,/bi/api/intelligent/app/install/config,/bi/api/intelligent/yonghong/check,/bi/api/intelligent/dataSet/list,/bi/api/intelligent/app/preset/list,/bi/api/intelligent/dataSet/update,/bi/api/intelligent/app/import-export-visible,
+后续省略
+
+请求2：
+POST /bi/api/orgMember/queryAuthList HTTP/1.1
+Host: a82.seeyoncd.com
+X-Last-Requested-ID: 586001cf-3c1d-4ad5-8744-569da780fa2c
+Accept-Language: zh-CN,zh;q=0.8,zh-TW;q=0.7,zh-HK;q=0.5,en-US;q=0.3,en;q=0.2
+Accept-Encoding: gzip, deflate
+X-Requested-By: fe-seeyon-bi-com
+Referer: http://a82.seeyoncd.com/bi/repository-management/data-warehouse
+X-Current-Requested-Time: 2025-09-17 17:20:39 229
+User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:142.0) Gecko/20100101 Firefox/142.0
+Content-Type: application/json
+Cookie: login_locale=zh_CN; sw_scope=3082323774871519895; avatarImageUrl=3082323774871519895; ssoToken=01633ceaqcee5q4c11qa1bcq4bd51c57f45f; __viewF__=; __editableF__=
+X-Requested-ID: b220e396-0974-4754-bf34-13ba45339e4c
+Origin: http://a82.seeyoncd.com
+Accept: application/json, text/plain, */*
+X-Last-Requested-Time: 2025-09-17 17:20:38 098
+Content-Length: 3
+
+{}
+
+
+响应2：
+POST /bi/api/orgMember/queryAuthList HTTP/1.1
+Host: a82.seeyoncd.com
+X-Last-Requested-ID: 586001cf-3c1d-4ad5-8744-569da780fa2c
+Accept-Language: zh-CN,zh;q=0.8,zh-TW;q=0.7,zh-HK;q=0.5,en-US;q=0.3,en;q=0.2
+Accept-Encoding: gzip, deflate
+X-Requested-By: fe-seeyon-bi-com
+Referer: http://a82.seeyoncd.com/bi/repository-management/data-warehouse
+X-Current-Requested-Time: 2025-09-17 17:20:39 229
+User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:142.0) Gecko/20100101 Firefox/142.0
+Content-Type: application/json
+Cookie: login_locale=zh_CN; sw_scope=3082323774871519895; avatarImageUrl=3082323774871519895; ssoToken=01633ceaqcee5q4c11qa1bcq4bd51c57f45f; __viewF__=; __editableF__=
+X-Requested-ID: b220e396-0974-4754-bf34-13ba45339e4c
+Origin: http://a82.seeyoncd.com
+Accept: application/json, text/plain, */*
+X-Last-Requested-Time: 2025-09-17 17:20:38 098
+Content-Length: 3
+
+{}
+
+请求3：
+POST /bi/api/orgMember/queryAuthList HTTP/1.1
+Host: a82.seeyoncd.com
+X-Last-Requested-ID: 586001cf-3c1d-4ad5-8744-569da780fa2c
+Accept-Language: zh-CN,zh;q=0.8,zh-TW;q=0.7,zh-HK;q=0.5,en-US;q=0.3,en;q=0.2
+Accept-Encoding: gzip, deflate
+X-Requested-By: fe-seeyon-bi-com
+Referer: http://a82.seeyoncd.com/bi/repository-management/data-warehouse
+X-Current-Requested-Time: 2025-09-17 17:20:39 229
+User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:142.0) Gecko/20100101 Firefox/142.0
+Content-Type: application/json
+Cookie: login_locale=zh_CN; sw_scope=3082323774871519895; avatarImageUrl=3082323774871519895; ssoToken=01633ceaqcee5q4c11qa1bcq4bd51c57f45f; __viewF__=; __editableF__=
+X-Requested-ID: b220e396-0974-4754-bf34-13ba45339e4c
+Origin: http://a82.seeyoncd.com
+Accept: application/json, text/plain, */*
+X-Last-Requested-Time: 2025-09-17 17:20:38 098
+Content-Length: 3
+
+{}
+
+响应3：
+HTTP/1.1 401
+Server: nginx/1.16.1
+Date: Wed, 17 Sep 2025 09:20:39 GMT
+Content-Type: application/json;charset=UTF-8
+Connection: keep-alive
+Content-Length: 98
+
+{
+  "traceId": "b85b898789596fc4f0efcd3d2b73e66d",
+  "code": 401,
+  "msg": "身份验证失败"
+}
+
+
+日志：
+[INFO] 2025-09-17 17:20:31 [grpc_mitm_v2:406] start to load yakScript[1636]: 越权未授权1.4 's capabilities
+[INFO] 2025-09-17 17:20:37 [grpc_duplex_conn:65] current lowhttp rps:7
+[INFO] 2025-09-17 17:20:37 [grpc_duplex_conn:82] current dialx cps:6
+[INFO] 2025-09-17 17:20:38 [grpc_duplex_conn:82] current dialx cps:0
+[INFO] 2025-09-17 17:20:38 [grpc_duplex_conn:65] current lowhttp rps:0
+[INFO] 2025-09-17 17:20:39 [__main__] 【未授权访问漏洞】URL: http://a82.seeyoncd.com/bi/api/orgMember/queryAuthList
+[INFO] 2025-09-17 17:20:39 [__main__] 响应体相似度: 0.95（阈值: 0.80）
+[INFO] 2025-09-17 17:20:39 [__main__] 已删除请求头: [Authorization]
+[INFO] 2025-09-17 17:20:40 [grpc_duplex_conn:82] current dialx cps:4
+[INFO] 2025-09-17 17:20:40 [grpc_duplex_conn:65] current lowhttp rps:11
+[INFO] 2025-09-17 17:20:41 [grpc_duplex_conn:82] current dialx cps:2
+[INFO] 2025-09-17 17:20:41 [grpc_duplex_conn:65] current lowhttp rps:4
+[INFO] 2025-09-17 17:20:42 [grpc_duplex_conn:82] current dialx cps:0
+[INFO] 2025-09-17 17:20:42 [grpc_duplex_conn:65] current lowhttp rps:0
+
+请求2和请求3是插件去掉Authorization头发送的，响应明显和原本的请求1不一样，为什么判定为了相似？而且原始请求（请求1）只出现了一次，为什么插件发送了两个请求？而且漏洞记录里也没有新增未授权访问漏洞。参考官方文档：
+https://yaklang.com/articles/first-poc-in-yakit/
+https://yaklang.com/docs/yak-basic/cap8-4-yaml-poc/
+https://yaklang.com/docs/yakexamples/how_to_make_poc/
